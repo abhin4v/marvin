@@ -1,7 +1,7 @@
 (ns marvin.core
   (:import [java.text BreakIterator]
            [marvin Bot])
-  (:use [clojure.string :only (lower-case, join)]
+  (:use [clojure.string :only (lower-case, join, trim)]
         [clojure.contrib.string :only (split, replace-str)])
   (:gen-class))
 
@@ -84,12 +84,12 @@
     (swap! endphrase-set-atom conj-non-nil (last tokens))))
 
 (defn create-sentence
-  [trained-map
-   startphrase-list
-   endphrase-set
-   min-length
-   max-length]
-  (let [start (rand-nth startphrase-list)]
+  ([start
+    trained-map
+    startphrase-list
+    endphrase-set
+    min-length
+    max-length]
     (loop [sentence start current-phrase start]
       (if (and
             (>= (count sentence) min-length)
@@ -100,7 +100,19 @@
         (let [next-word (rand-nth (trained-map current-phrase))]
           (recur
             (conj sentence next-word)
-            (conj (subvec current-phrase 1) next-word)))))))
+            (conj (subvec current-phrase 1) next-word))))))
+  ([trained-map
+    startphrase-list
+    endphrase-set
+    min-length
+    max-length]
+    (create-sentence
+      (rand-nth startphrase-list)
+      trained-map
+      startphrase-list
+      endphrase-set
+      min-length
+      max-length)))
 
 (defn make-bot [name on-msg-cb]
   (doto
@@ -134,30 +146,46 @@
    max-sentence-length]
   (let [msg-count (atom 0)]
     (fn [bot channel sender login hostname message]
-      (let [create-statement-and-send
-              (fn []
-                (let [sentence
-                        (create-sentence
-                          @trained-map-atom @startphrase-list-atom
-                          @endphrase-set-atom
-                          min-sentence-length max-sentence-length)]
-                  (println ">>> Sending message:" sentence)
-                  (send-message bot channel sentence)))]
+      (let [speak-about-pattern (re-pattern (str "speak about (.*) " (.getName bot)))
+            message (trim message)
+            create-statement-and-send
+              (fn
+                ([]
+                  (let [sentence
+                          (create-sentence
+                            @trained-map-atom @startphrase-list-atom
+                            @endphrase-set-atom
+                            min-sentence-length max-sentence-length)]
+                    (println ">>> Sending message:" sentence)
+                    (send-message bot channel sentence)))
+                ([start]
+                  (let [sentence
+                          (create-sentence [start]
+                            @trained-map-atom @startphrase-list-atom
+                            @endphrase-set-atom
+                            min-sentence-length max-sentence-length)]
+                    (println ">>> Sending message:" sentence)
+                    (send-message bot channel sentence)))) ]
         (try
-          (if (= message (str "speak " (.getName bot)))
-            (create-statement-and-send)
-            (doseq [line (sentencize-text message)]
-              (when-not (= 1 (count (tokenize-line line)))
-                (do
-                  (println sender ":" line)
-                  (process-line
-                    line
-                    trained-map-atom startphrase-list-atom
-                    endphrase-set-atom line-list-atom
-                    key-size history-size)
-                  (swap! msg-count inc)
-                  (when (zero? (mod @msg-count speak-interval))
-                    (create-statement-and-send))))))
+          (cond
+            (= message (str "speak " (.getName bot)))
+              (create-statement-and-send)
+            (not (nil? (re-matches speak-about-pattern message)))
+              (create-statement-and-send
+                (lower-case (second (re-matches speak-about-pattern message))))
+            :else
+              (doseq [line (sentencize-text message)]
+                (when-not (= 1 (count (tokenize-line line)))
+                  (do
+                    (println sender ":" line)
+                    (process-line
+                      line
+                      trained-map-atom startphrase-list-atom
+                      endphrase-set-atom line-list-atom
+                      key-size history-size)
+                    (swap! msg-count inc)
+                    (when (zero? (mod @msg-count speak-interval))
+                      (create-statement-and-send))))))
           (catch Exception e (.printStackTrace e)))))))
 
 (defn -main [& args]
@@ -167,4 +195,4 @@
     (connect bot "A4E.Immortal-Anime.net" "#animestan")))
 ;filter out links
 ;switch to pircbotx
-;troll users
+;add persistence
