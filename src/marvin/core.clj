@@ -1,16 +1,18 @@
 (ns marvin.core
   (:import [java.text BreakIterator]
+           [java.io File]
            [marvin Bot])
   (:use [clojure.string :only (lower-case, join, trim)]
-        [clojure.contrib.string :only (split, replace-str)])
+        [clojure.java.io :only (file, reader)]
+        [clojure.contrib.string :only (split, replace-str)]
+        [clojure.contrib.io :only (pwd, write-lines)])
   (:gen-class))
-
-(def non-char-pattern (re-pattern "[\\p{Z}\\p{C}\\p{P}]+"))
 
 (defn log [o] (do (println o) o))
 
 (defn tokenize-line [line]
-  (let [tokenize
+  (let [non-char-pattern (re-pattern "[\\p{Z}\\p{C}\\p{P}]+")
+        tokenize
           (fn tokenize [text bi idx tokens]
             (lazy-seq
               (if (= (.next bi) BreakIterator/DONE)
@@ -98,9 +100,11 @@
               (>= (count sentence) max-length)))
         (join " " sentence)
         (let [next-word (rand-nth (trained-map current-phrase))]
-          (recur
-            (conj sentence next-word)
-            (conj (subvec current-phrase 1) next-word))))))
+          (if (nil? next-word)
+            (join " " sentence)
+            (recur
+              (conj sentence next-word)
+              (conj (subvec current-phrase 1) next-word)))))))
   ([trained-map
     startphrase-list
     endphrase-set
@@ -114,11 +118,36 @@
       min-length
       max-length)))
 
+(defn recall-memory
+  [bot
+   trained-map-atom
+   startphrase-list-atom
+   endphrase-set-atom
+   line-list-atom
+   key-size
+   history-size]
+  (let [filename (str (pwd) File/separator (.getName bot) ".mem")]
+    (when (.exists (file filename))
+      (with-open [rdr (reader filename)]
+        (doseq [line (line-seq rdr)]
+          (process-line
+            line
+            trained-map-atom
+            startphrase-list-atom
+            endphrase-set-atom
+            line-list-atom
+            key-size
+            history-size))))))
+
+(defn save-memory [bot line-list]
+  (let [filename (str (pwd) File/separator (.getName bot) ".mem")]
+    (write-lines filename line-list)))
+
 (defn send-message [bot channel message]
   (.sendMessage bot channel message))
 
 (defn make-bot
-  [name
+  [bot-name
    on-message-callback
    on-action-callback
    on-connect-callback
@@ -135,7 +164,7 @@
       (onKick [channel kicker-nick kicker-login kicker-hostname recipient-nick reason]
         (on-kick-callback
           this channel kicker-nick kicker-login kicker-hostname recipient-nick reason)))
-    (.setBotName name)))
+    (.setBotName bot-name)))
 
 (defn create-on-message-callback
   [trained-map-atom
@@ -144,6 +173,7 @@
    line-list-atom
    key-size
    history-size
+   save-interval
    speak-interval
    min-sentence-length
    max-sentence-length]
@@ -159,7 +189,8 @@
                             @trained-map-atom
                             @startphrase-list-atom
                             @endphrase-set-atom
-                            min-sentence-length max-sentence-length)]
+                            min-sentence-length
+                            max-sentence-length)]
                     (println ">> Sending message:" sentence)
                     (send-message bot channel sentence)))
                 ([start]
@@ -169,10 +200,12 @@
                             @trained-map-atom
                             @startphrase-list-atom
                             @endphrase-set-atom
-                            min-sentence-length max-sentence-length)]
+                            min-sentence-length
+                            max-sentence-length)]
                     (println ">> Sending message:" sentence)
                     (send-message bot channel sentence)))) ]
         (try
+          (swap! msg-count inc)
           (cond
             (= message (str "speak " (.getName bot)))
               (do (println "Replying to speak command:" message)
@@ -188,29 +221,53 @@
                   lower-case
                   create-statement-and-send))
             :else
-              (doseq [line (sentencize-text message)]
-                (when-not (= 1 (count (tokenize-line line)))
-                  (do
-                    (println ">" sender ":" line)
-                    (process-line
-                      line
-                      trained-map-atom
-                      startphrase-list-atom
-                      endphrase-set-atom
-                      line-list-atom
-                      key-size history-size)
-                    (swap! msg-count inc)
-                    (when (zero? (mod @msg-count speak-interval))
-                      (create-statement-and-send))))))
+              (do
+                (doseq [line (sentencize-text message)]
+                  (when-not (= 1 (count (tokenize-line line)))
+                    (do
+                      (println ">" sender ":" line)
+                      (process-line
+                        line
+                        trained-map-atom
+                        startphrase-list-atom
+                        endphrase-set-atom
+                        line-list-atom
+                        key-size
+                        history-size)
+                      (when (<= (rand) (/ 1 speak-interval))
+                        (create-statement-and-send)))))
+                (when (zero? (mod @msg-count save-interval))
+                  (println "Saving memory")
+                  (save-memory bot @line-list-atom))))
           (catch Exception e (.printStackTrace e)))))))
 
-(defn -main [& args]
-  (let [server "A4E.Immortal-Anime.net"
-        channel "#animestan"
+(defn run-bot
+  [server
+   channel
+   bot-name
+   key-size
+   history-size
+   save-interval
+   speak-interval
+   min-sentence-length
+   max-sentence-length]
+  (let [trained-map-atom (atom {})
+        startphrase-list-atom (atom [])
+        endphrase-set-atom (atom #{})
+        line-list-atom (atom [])
         on-message-callback
           (create-on-message-callback
-            (atom {}) (atom []) (atom #{}) (atom []) 1 500 10 6 15)
-        bot (make-bot "marvin"
+            trained-map-atom
+            startphrase-list-atom
+            endphrase-set-atom
+            line-list-atom
+            key-size
+            history-size
+            save-interval
+            speak-interval
+            min-sentence-length
+            max-sentence-length)
+        bot (make-bot bot-name
               on-message-callback
               (fn [bot sender login hostname target action]
                 (on-message-callback
@@ -224,13 +281,22 @@
               (fn [bot _ _ _ _ _ _]
                 (do (println "Kicked. Rejoining.")
                   (.joinChannel bot channel))))]
+    (println "Running" bot-name "on" server channel)
     (doto bot
+      (recall-memory
+        trained-map-atom
+        startphrase-list-atom
+        endphrase-set-atom
+        line-list-atom
+        key-size
+        history-size)
       (.connect server)
       (.joinChannel channel))))
 
+(defn -main [& args]
+  (run-bot "A4E.Immortal-Anime.net" "#animestan" "marvin" 1 500 50 10 6 15))
+
 ;;filter out links
 ;;switch to pircbotx
-;;add persistence
 ;;pronoun substitution
 ;;externalize parameters
-;;add random behaviour
