@@ -114,25 +114,28 @@
       min-length
       max-length)))
 
-(defn make-bot [name on-msg-cb]
+(defn send-message [bot channel message]
+  (.sendMessage bot channel message))
+
+(defn make-bot
+  [name
+   on-message-callback
+   on-action-callback
+   on-connect-callback
+   on-disconnect-callback
+   on-kick-callback]
   (doto
     (proxy [Bot][]
       (onMessage [channel sender login hostname message]
-        (on-msg-cb this channel sender login hostname message)))
+        (on-message-callback this channel sender login hostname message))
+      (onAction [sender login hostname target action]
+        (on-action-callback this sender login hostname target action))
+      (onConnect [] (on-connect-callback this))
+      (onDisconnect [] (on-disconnect-callback this))
+      (onKick [channel kicker-nick kicker-login kicker-hostname recipient-nick reason]
+        (on-kick-callback
+          this channel kicker-nick kicker-login kicker-hostname recipient-nick reason)))
     (.setBotName name)))
-
-(defn connect [bot server channel]
-  (doto bot
-    (.connect server)
-    (.joinChannel channel)))
-
-(defn disconnect [bot channel]
-  (doto bot
-    (.partChannel channel)
-    (.disconnect)))
-
-(defn send-message [bot channel message]
-  (.sendMessage bot channel message))
 
 (defn create-on-message-callback
   [trained-map-atom
@@ -153,35 +156,48 @@
                 ([]
                   (let [sentence
                           (create-sentence
-                            @trained-map-atom @startphrase-list-atom
+                            @trained-map-atom
+                            @startphrase-list-atom
                             @endphrase-set-atom
                             min-sentence-length max-sentence-length)]
-                    (println ">>> Sending message:" sentence)
+                    (println ">> Sending message:" sentence)
                     (send-message bot channel sentence)))
                 ([start]
                   (let [sentence
-                          (create-sentence [start]
-                            @trained-map-atom @startphrase-list-atom
+                          (create-sentence
+                            [start]
+                            @trained-map-atom
+                            @startphrase-list-atom
                             @endphrase-set-atom
                             min-sentence-length max-sentence-length)]
-                    (println ">>> Sending message:" sentence)
+                    (println ">> Sending message:" sentence)
                     (send-message bot channel sentence)))) ]
         (try
           (cond
             (= message (str "speak " (.getName bot)))
-              (create-statement-and-send)
+              (do (println "Replying to speak command:" message)
+                (create-statement-and-send))
             (not (nil? (re-matches speak-about-pattern message)))
-              (create-statement-and-send
-                (lower-case (second (re-matches speak-about-pattern message))))
+              (do (println "Replying to speak about command:" message)
+                (->>
+                  message
+                  (re-matches speak-about-pattern)
+                  second
+                  (split #"\s+")
+                  first
+                  lower-case
+                  create-statement-and-send))
             :else
               (doseq [line (sentencize-text message)]
                 (when-not (= 1 (count (tokenize-line line)))
                   (do
-                    (println sender ":" line)
+                    (println ">" sender ":" line)
                     (process-line
                       line
-                      trained-map-atom startphrase-list-atom
-                      endphrase-set-atom line-list-atom
+                      trained-map-atom
+                      startphrase-list-atom
+                      endphrase-set-atom
+                      line-list-atom
                       key-size history-size)
                     (swap! msg-count inc)
                     (when (zero? (mod @msg-count speak-interval))
@@ -189,10 +205,32 @@
           (catch Exception e (.printStackTrace e)))))))
 
 (defn -main [& args]
-  (let [bot (make-bot "marvin"
-              (create-on-message-callback
-                (atom {}) (atom []) (atom #{}) (atom []) 1 500 10 6 10))]
-    (connect bot "A4E.Immortal-Anime.net" "#animestan")))
-;filter out links
-;switch to pircbotx
-;add persistence
+  (let [server "A4E.Immortal-Anime.net"
+        channel "#animestan"
+        on-message-callback
+          (create-on-message-callback
+            (atom {}) (atom []) (atom #{}) (atom []) 1 500 10 6 15)
+        bot (make-bot "marvin"
+              on-message-callback
+              (fn [bot sender login hostname target action]
+                (on-message-callback
+                  bot channel sender login hostname (str sender " " action)))
+              (fn [bot] (println "Connected to" (.getServer bot)))
+              (fn [bot]
+                (do (println "Disconnected. Reconnecting.")
+                  (doto bot
+                    (.connect server)
+                    (.joinChannel channel))))
+              (fn [bot _ _ _ _ _ _]
+                (do (println "Kicked. Rejoining.")
+                  (.joinChannel bot channel))))]
+    (doto bot
+      (.connect server)
+      (.joinChannel channel))))
+
+;;filter out links
+;;switch to pircbotx
+;;add persistence
+;;pronoun substitution
+;;externalize parameters
+;;add random behaviour
