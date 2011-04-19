@@ -1,5 +1,6 @@
 (ns marvin.core
   (:import [java.text BreakIterator]
+           [java.util.regex Pattern]
            [java.io File]
            [marvin Bot])
   (:use [clojure.string :only (lower-case, join, trim)]
@@ -8,7 +9,7 @@
         [clojure.contrib.io :only (pwd, write-lines)])
   (:gen-class))
 
-(defn log [o] (do (println o) o))
+(defn parse-int [s] (Integer/parseInt s))
 
 (defn tokenize-line [line]
   (let [non-char-pattern (re-pattern "[\\p{Z}\\p{C}\\p{P}]+")
@@ -146,6 +147,12 @@
 (defn send-message [bot channel message]
   (.sendMessage bot channel message))
 
+(defn send-action [bot channel action]
+  (.sendAction bot channel action))
+
+(defn change-nick [bot nick]
+  (.changeNick bot nick))
+
 (defn make-bot
   [bot-name
    on-message-callback
@@ -177,9 +184,10 @@
    speak-interval
    min-sentence-length
    max-sentence-length]
-  (let [msg-count (atom 0)]
+  (let [msg-count (atom 0)
+        bot-talking? (atom true)]
     (fn [bot channel sender login hostname message]
-      (let [speak-about-pattern (re-pattern (str "speak about (.*) " (.getName bot)))
+      (let [speak-about-pattern (re-pattern (str "speak about (.*) " (Pattern/quote (.getNick bot))))
             message (trim message)
             create-statement-and-send
               (fn
@@ -207,7 +215,17 @@
         (try
           (swap! msg-count inc)
           (cond
-            (= message (str "speak " (.getName bot)))
+            (= message (str "shutup " (.getNick bot)))
+              (do (println "Shutting up")
+                (reset! bot-talking? false)
+                (send-action bot channel "shuts up")
+                (change-nick bot (str (.getName bot) "|muted")))
+            (= message (str "talk " (.getNick bot)))
+              (do (println "Talking")
+                (reset! bot-talking? true)
+                (send-action bot channel "can talk now")
+                (change-nick bot (.getName bot)))
+            (= message (str "speak " (.getNick bot)))
               (do (println "Replying to speak command:" message)
                 (create-statement-and-send))
             (not (nil? (re-matches speak-about-pattern message)))
@@ -234,7 +252,9 @@
                         line-list-atom
                         key-size
                         history-size)
-                      (when (<= (rand) (/ 1 speak-interval))
+                      (when (and
+                              @bot-talking?
+                              (<= (rand) (/ 1 speak-interval)))
                         (create-statement-and-send)))))
                 (when (zero? (mod @msg-count save-interval))
                   (println "Saving memory")
@@ -293,10 +313,27 @@
       (.connect server)
       (.joinChannel channel))))
 
-(defn -main [& args]
-  (run-bot "A4E.Immortal-Anime.net" "#animestan" "marvin" 1 500 50 10 6 15))
+(defn -main
+  [& [server
+      channel
+      bot-name
+      key-size
+      history-size
+      save-interval
+      speak-interval
+      min-sentence-length
+      max-sentence-length]]
+  (run-bot
+    server
+    channel
+    bot-name
+    (parse-int key-size)
+    (parse-int history-size)
+    (parse-int save-interval)
+    (parse-int speak-interval)
+    (parse-int min-sentence-length)
+    (parse-int max-sentence-length)))
 
 ;;filter out links
 ;;switch to pircbotx
 ;;pronoun substitution
-;;externalize parameters
