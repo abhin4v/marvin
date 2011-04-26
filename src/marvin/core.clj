@@ -11,6 +11,10 @@
 
 (defn parse-int [s] (Integer/parseInt s))
 
+(def url-pattern
+  #"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'\".,<>?«»“”‘’]))")
+
+
 (defn tokenize-line [line]
   (let [non-char-pattern (re-pattern "[\\p{Z}\\p{C}\\p{P}]+")
         tokenize
@@ -211,7 +215,7 @@
                             min-sentence-length
                             max-sentence-length)]
                     (println ">> Sending message:" sentence)
-                    (send-message bot channel sentence)))) ]
+                    (send-message bot channel sentence))))]
         (try
           (swap! msg-count inc)
           (cond
@@ -241,21 +245,24 @@
             :else
               (do
                 (doseq [line (sentencize-text message)]
-                  (when-not (= 1 (count (tokenize-line line)))
-                    (do
-                      (println ">" sender ":" line)
-                      (process-line
-                        line
-                        trained-map-atom
-                        startphrase-list-atom
-                        endphrase-set-atom
-                        line-list-atom
-                        key-size
-                        history-size)
-                      (when (and
-                              @bot-talking?
-                              (<= (rand) (/ 1 speak-interval)))
-                        (create-statement-and-send)))))
+                  (let [urls (map first (re-seq url-pattern line))]
+                    (if (not (empty? urls))
+                      (doseq [url urls] (println "Url Found >" url))
+                      (when-not (= 1 (count (tokenize-line line)))
+                        (do
+                          (println ">" sender ":" line)
+                          (process-line
+                            line
+                            trained-map-atom
+                            startphrase-list-atom
+                            endphrase-set-atom
+                            line-list-atom
+                            key-size
+                            history-size)
+                          (when (and
+                                  @bot-talking?
+                                  (<= (rand) (/ 1 speak-interval)))
+                            (create-statement-and-send)))))))
                 (when (zero? (mod @msg-count save-interval))
                   (println "Saving memory")
                   (save-memory bot @line-list-atom))))
@@ -334,6 +341,5 @@
     (parse-int min-sentence-length)
     (parse-int max-sentence-length)))
 
-;;filter out links
 ;;switch to pircbotx
 ;;pronoun substitution
