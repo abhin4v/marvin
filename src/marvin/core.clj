@@ -149,7 +149,8 @@
     (write-lines filename line-list)))
 
 (defn send-message [bot channel message]
-  (.sendMessage bot channel message))
+  (do (println ">> Sending message:" message)
+    (.sendMessage bot channel message)))
 
 (defn send-action [bot channel action]
   (.sendAction bot channel action))
@@ -178,6 +179,21 @@
     (.setBotName bot-name)))
 
 (defn create-on-message-callback
+  [message-reaction-fns default-fn msg-count]
+  (fn [bot channel sender login hostname message]
+    (let [message (trim message)]
+      (try
+        (swap! msg-count inc)
+        (loop [message-reaction-fns message-reaction-fns]
+          (if (empty? message-reaction-fns)
+            (default-fn bot channel sender login hostname message)
+            (let [[pred reaction] (first message-reaction-fns)]
+              (if (pred bot channel sender login hostname message)
+                (reaction bot channel sender login hostname message)
+                (recur (next message-reaction-fns))))))
+        (catch Exception e (.printStackTrace e))))))
+
+(defn create-message-reaction-fns
   [trained-map-atom
    startphrase-list-atom
    endphrase-set-atom
@@ -187,86 +203,100 @@
    save-interval
    speak-interval
    min-sentence-length
-   max-sentence-length]
-  (let [msg-count (atom 0)
-        bot-talking? (atom true)]
-    (fn [bot channel sender login hostname message]
-      (let [speak-about-pattern (re-pattern (str "speak about (.*) " (Pattern/quote (.getNick bot))))
-            message (trim message)
-            create-statement-and-send
-              (fn
-                ([]
-                  (let [sentence
-                          (create-sentence
-                            @trained-map-atom
-                            @startphrase-list-atom
-                            @endphrase-set-atom
-                            min-sentence-length
-                            max-sentence-length)]
-                    (println ">> Sending message:" sentence)
-                    (send-message bot channel sentence)))
-                ([start]
-                  (let [sentence
-                          (create-sentence
-                            [start]
-                            @trained-map-atom
-                            @startphrase-list-atom
-                            @endphrase-set-atom
-                            min-sentence-length
-                            max-sentence-length)]
-                    (println ">> Sending message:" sentence)
-                    (send-message bot channel sentence))))]
-        (try
-          (swap! msg-count inc)
-          (cond
-            (= message (str "shutup " (.getNick bot)))
-              (do (println "Shutting up")
-                (reset! bot-talking? false)
-                (send-action bot channel "shuts up")
-                (change-nick bot (str (.getName bot) "|muted")))
-            (= message (str "talk " (.getNick bot)))
-              (do (println "Talking")
-                (reset! bot-talking? true)
-                (send-action bot channel "can talk now")
-                (change-nick bot (.getName bot)))
-            (= message (str "speak " (.getNick bot)))
-              (do (println "Replying to speak command:" message)
-                (create-statement-and-send))
-            (not (nil? (re-matches speak-about-pattern message)))
-              (do (println "Replying to speak about command:" message)
-                (->>
-                  message
-                  (re-matches speak-about-pattern)
-                  second
-                  (split #"\s+")
-                  first
-                  lower-case
-                  create-statement-and-send))
-            :else
-              (do
-                (doseq [line (sentencize-text message)]
-                  (let [urls (map first (re-seq url-pattern line))]
-                    (if (not (empty? urls))
-                      (doseq [url urls] (println "Url Found >" url))
-                      (when-not (= 1 (count (tokenize-line line)))
-                        (do
-                          (println ">" sender ":" line)
-                          (process-line
-                            line
-                            trained-map-atom
-                            startphrase-list-atom
-                            endphrase-set-atom
-                            line-list-atom
-                            key-size
-                            history-size)
-                          (when (and
-                                  @bot-talking?
-                                  (<= (rand) (/ 1 speak-interval)))
-                            (create-statement-and-send)))))))
-                (when (zero? (mod @msg-count save-interval))
-                  (println "Saving memory")
-                  (save-memory bot @line-list-atom))))
-          (catch Exception e (.printStackTrace e)))))))
+   max-sentence-length
+   msg-count]
+  (let [bot-talking? (atom true)
+        message-reaction-fns
+          [
+            ;shutup handler
+            [(fn [bot _ _ _ _ message] (= message (str "shutup " (.getNick bot))))
+             (fn [bot channel _ _ _ _]
+                (do (println "Shutting up")
+                  (reset! bot-talking? false)
+                  (send-action bot channel "shuts up")
+                  (change-nick bot (str (.getName bot) "|muted"))))]
+
+            ;talk handler
+            [(fn [bot _ _ _ _ message] (= message (str "talk " (.getNick bot))))
+             (fn [bot channel _ _ _ _]
+                (do (println "Talking")
+                  (reset! bot-talking? true)
+                  (send-action bot channel "can talk now")
+                  (change-nick bot (.getName bot))))]
+
+            ;speak handler
+            [(fn [bot _ _ _ _ message] (= message (str "speak " (.getNick bot))))
+             (fn [bot channel _ _ _ message]
+                (do (println "Replying to speak command:" message)
+                  (send-message bot channel
+                    (create-sentence
+                      @trained-map-atom
+                      @startphrase-list-atom
+                      @endphrase-set-atom
+                      min-sentence-length
+                      max-sentence-length))))]
+
+            ;speak about handler
+            [(fn [bot _ _ _ _ message]
+                (not
+                  (nil?
+                    (re-matches
+                      (re-pattern
+                        (str "speak about (.*) " (Pattern/quote (.getNick bot))))
+                      message))))
+              (fn [bot channel _ _ _ message]
+                (do (println "Replying to speak about command:" message)
+                  (->>
+                    message
+                    (re-matches
+                      (re-pattern
+                        (str "speak about (.*) " (Pattern/quote (.getNick bot)))))
+                    second
+                    (split #"\s+")
+                    first
+                    lower-case
+                    (fn [start]
+                      (send-message bot channel
+                        (create-sentence
+                          [start]
+                          @trained-map-atom
+                          @startphrase-list-atom
+                          @endphrase-set-atom
+                          min-sentence-length
+                          max-sentence-length))))))]]
+
+        default-fn
+          (fn [bot channel sender _ _ message]
+            (do
+              (doseq [line (sentencize-text message)]
+                (let [urls (map first (re-seq url-pattern line))]
+                  (if (not (empty? urls))
+                    (doseq [url urls] (println "Url Found >" url))
+                    (when-not (= 1 (count (tokenize-line line)))
+                      (do
+                        (println ">" sender ":" line)
+                        (process-line
+                          line
+                          trained-map-atom
+                          startphrase-list-atom
+                          endphrase-set-atom
+                          line-list-atom
+                          key-size
+                          history-size)
+                        (when (and
+                                @bot-talking?
+                                (<= (rand) (/ 1 speak-interval)))
+                          (send-message bot channel
+                            (create-sentence
+                              @trained-map-atom
+                              @startphrase-list-atom
+                              @endphrase-set-atom
+                              min-sentence-length
+                              max-sentence-length))))))))
+              (when (zero? (mod @msg-count save-interval))
+                (println "Saving memory")
+                (save-memory bot @line-list-atom))))]
+  [message-reaction-fns default-fn]))
 
 (defn run-bot
   [server
@@ -278,12 +308,14 @@
    speak-interval
    min-sentence-length
    max-sentence-length]
-  (let [trained-map-atom (atom {})
+  (let [key-size (if (or (< key-size 0) (> key-size 2)) 2 key-size)
+        trained-map-atom (atom {})
         startphrase-list-atom (atom [])
         endphrase-set-atom (atom #{})
         line-list-atom (atom [])
-        on-message-callback
-          (create-on-message-callback
+        msg-count (atom 0)
+        [message-reaction-fns default-fn]
+          (create-message-reaction-fns
             trained-map-atom
             startphrase-list-atom
             endphrase-set-atom
@@ -293,7 +325,10 @@
             save-interval
             speak-interval
             min-sentence-length
-            max-sentence-length)
+            max-sentence-length
+            msg-count)
+        on-message-callback
+          (create-on-message-callback message-reaction-fns default-fn msg-count)
         bot (make-bot bot-name
               on-message-callback
               (fn [bot sender login hostname target action]
@@ -309,6 +344,13 @@
                 (do (println "Kicked. Rejoining.")
                   (.joinChannel bot channel))))]
     (println "Running" bot-name "on" server channel)
+    (println "Configuration:")
+    (println "> key size =" key-size)
+    (println "> history size =" history-size)
+    (println "> save interval =" save-interval)
+    (println "> speak interval =" speak-interval)
+    (println "> min sentence length =" min-sentence-length)
+    (println "> max sentence length =" max-sentence-length)
     (doto bot
       (recall-memory
         trained-map-atom
